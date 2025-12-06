@@ -210,16 +210,20 @@ def handle_pin_model_command(command: str) -> bool:
     model_name = tokens[2]
 
     # Handle special case: (unpin) option
-    if model_name == "(unpin)":
+    if model_name.lower() == "(unpin)":
         # Delegate to unpin command
         return handle_unpin_command(f"/unpin {agent_name}")
 
-    # Check if model exists
+    # Check if model exists (case-insensitive)
     available_models = load_model_names()
-    if model_name not in available_models:
+    model_match = next((m for m in available_models if m.lower() == model_name.lower()), None)
+    
+    if not model_match:
         emit_error(f"Model '{model_name}' not found")
         emit_warning(f"Available models: {', '.join(available_models)}")
         return True
+        
+    model_name = model_match
 
     # Check if this is a JSON agent or a built-in Python agent
     json_agents = discover_json_agents()

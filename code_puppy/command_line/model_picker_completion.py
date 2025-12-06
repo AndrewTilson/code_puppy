@@ -101,22 +101,36 @@ def update_model_in_input(text: str) -> Optional[str]:
     content = text.strip()
 
     # Check for /model command (require space after /model, case-insensitive)
+    import re
+
+    # Check for /model command (require space after /model, case-insensitive)
     if content.lower().startswith("/model "):
         # Find the actual /model command (case-insensitive)
         model_cmd = content.split(" ", 1)[0]  # Get the command part
         rest = content[len(model_cmd) :].strip()  # Remove the actual command
         model_names = load_model_names()
         for model in model_names:
+            # Check if rest starts with model name (case-insensitive)
+            # Use regex to ensure word boundary if model name doesn't end with symbol
+            # But model names often contain hyphens.
+            # Simple check: rest matches model exactly OR rest starts with model + space
+            is_match = False
             if rest.lower() == model.lower():
+                is_match = True
+            elif rest.lower().startswith(model.lower() + " "):
+                is_match = True
+            
+            if is_match:
                 set_active_model(model)
-                # Remove the actual /model command from the input (preserves case)
-                model_cmd_with_space = model_cmd + " " + model
-                idx = text.find(model_cmd_with_space)
-                if idx != -1:
-                    new_text = (
-                        text[:idx] + text[idx + len(model_cmd_with_space) :]
-                    ).strip()
-                    return new_text
+                # Remove the actual /model command and model match from the input
+                # Pattern: command + spaces + model + optional spaces
+                pattern = re.compile(re.escape(model_cmd) + r"\s+" + re.escape(model), re.IGNORECASE)
+                match = pattern.match(text)
+                if match:
+                   new_text = text[match.end() :].strip()
+                   return new_text
+                # Fallback
+                return ""
 
     # Check for /m command (case-insensitive)
     elif content.lower().startswith("/m ") and not content.lower().startswith(
@@ -127,16 +141,22 @@ def update_model_in_input(text: str) -> Optional[str]:
         rest = content[len(m_cmd) :].strip()  # Remove the actual command
         model_names = load_model_names()
         for model in model_names:
+             # Check if rest starts with model name (case-insensitive)
+            is_match = False
             if rest.lower() == model.lower():
+                is_match = True
+            elif rest.lower().startswith(model.lower() + " "):
+                is_match = True
+
+            if is_match:
                 set_active_model(model)
-                # Remove the actual /m command from the input (preserves case)
-                m_cmd_with_space = m_cmd + " " + model
-                idx = text.find(m_cmd_with_space)
-                if idx != -1:
-                    new_text = (
-                        text[:idx] + text[idx + len(m_cmd_with_space) :]
-                    ).strip()
-                    return new_text
+                # Remove the actual /m command and model (preserves case and spacing)
+                pattern = re.compile(re.escape(m_cmd) + r"\s+" + re.escape(model), re.IGNORECASE)
+                match = pattern.match(text)
+                if match:
+                   new_text = text[match.end() :].strip()
+                   return new_text
+                return ""
 
     return None
 
