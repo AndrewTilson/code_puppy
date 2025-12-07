@@ -80,6 +80,11 @@ async def main():
         help="Specify which model to use (e.g., --model gpt-5)",
     )
     parser.add_argument(
+        "--no-prompt-toolkit",
+        action="store_true",
+        help="Use simple input() instead of prompt_toolkit (useful for testing/CI)",
+    )
+    parser.add_argument(
         "command", nargs="*", help="Run a single command (deprecated, use -p instead)"
     )
     args = parser.parse_args()
@@ -351,15 +356,15 @@ async def main():
                     "Error: Textual UI not available. Install with: pip install textual"
                 )
                 emit_warning("Falling back to interactive mode...")
-                await interactive_mode(message_renderer)
+                await interactive_mode(message_renderer, use_simple_input=args.no_prompt_toolkit)
             except Exception as e:
                 from code_puppy.messaging import emit_error, emit_warning
 
                 emit_error(f"TUI Error: {str(e)}")
                 emit_warning("Falling back to interactive mode...")
-                await interactive_mode(message_renderer)
+                await interactive_mode(message_renderer, use_simple_input=args.no_prompt_toolkit)
         elif args.interactive or initial_command:
-            await interactive_mode(message_renderer, initial_command=initial_command)
+            await interactive_mode(message_renderer, initial_command=initial_command, use_simple_input=args.no_prompt_toolkit)
         else:
             await prompt_then_interactive_mode(message_renderer)
     finally:
@@ -371,7 +376,7 @@ async def main():
 
 
 # Add the file handling functionality for interactive mode
-async def interactive_mode(message_renderer, initial_command: str = None) -> None:
+async def interactive_mode(message_renderer, initial_command: str = None, use_simple_input: bool = False) -> None:
     from code_puppy.command_line.command_handler import handle_command
 
     """Run the agent in interactive mode."""

@@ -414,7 +414,12 @@ def spawned_cli(
 
     Robust to first-run prompts; gracefully proceeds if config exists.
     """
-    result = cli_harness.spawn(args=["-i"], env=integration_env)
+    # Auto-add --no-prompt-toolkit flag on Windows to avoid prompt_toolkit console issues
+    args = ["-i"]
+    if sys.platform.startswith("win32"):
+        args.append("--no-prompt-toolkit")
+    
+    result = cli_harness.spawn(args=args, env=integration_env)
 
     # Try to satisfy first-run prompts if they appear; otherwise continue
     try:
