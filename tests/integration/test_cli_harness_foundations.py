@@ -2,13 +2,11 @@
 
 import os
 import pathlib
-import sys
 import time
 
 import pytest
 
 from tests.integration.cli_expect.harness import CliHarness, SpawnResult
-from tests.integration.cli_expect.spawn_utils import spawn_cli
 
 
 def test_harness_bootstrap_write_config(
@@ -48,58 +46,15 @@ def test_log_dump_path_exists(log_dump, tmp_path: pathlib.Path) -> None:
     assert not path.exists()  # not written until after test
 
 
-@pytest.mark.skipif(not sys.platform.startswith("win32"), reason="Windows-specific test")
-def test_spawned_cli_is_alive_windows() -> None:
-    """Test CLI startup on Windows using spawn_cli utility."""
-    child = spawn_cli(["code-puppy", "-i"])
-    try:
-        # Give it a moment to start
-        time.sleep(1)
-        # Verify it's alive
-        assert child.proc.poll() is None, "CLI process died immediately"
-        # Send quit
-        child.proc.stdin.write(b"/quit\n")
-        child.proc.stdin.flush()
-        child.proc.stdin.close()
-        child.proc.wait(timeout=5)
-    finally:
-        if child.proc.poll() is None:
-            child.proc.terminate()
-            child.proc.wait(timeout=2)
-
-
-@pytest.mark.skipif(sys.platform.startswith("win32"), reason="POSIX-specific test using spawned_cli fixture")
-def test_spawned_cli_is_alive_posix(spawned_cli: SpawnResult) -> None:
-    """spawned_cli fixture should hand us a live CLI at the task prompt (POSIX)."""
+def test_spawned_cli_is_alive(spawned_cli: SpawnResult) -> None:
+    """spawned_cli fixture should hand us a live CLI at the task prompt."""
     assert spawned_cli.child.isalive()
     log = spawned_cli.read_log()
     assert "Enter your coding task" in log or log == ""
 
 
-@pytest.mark.skipif(not sys.platform.startswith("win32"), reason="Windows-specific test")
-def test_send_command_returns_output_windows() -> None:
-    """Test CLI command acceptance on Windows using spawn_cli utility."""
-    child = spawn_cli(["code-puppy", "-i"])
-    try:
-        # Send a command and quit
-        child.proc.stdin.write(b"/set owner_name 'HarnessTest'\n")
-        child.proc.stdin.write(b"/quit\n")
-        child.proc.stdin.flush()
-        child.proc.stdin.close()
-        
-        output, _ = child.proc.communicate(timeout=10)
-        # Just verify we got output
-        assert output is not None
-        assert len(output) > 0
-    finally:
-        if child.proc.poll() is None:
-            child.proc.terminate()
-            child.proc.wait(timeout=2)
-
-
-@pytest.mark.skipif(sys.platform.startswith("win32"), reason="POSIX-specific test using spawned_cli fixture")
-def test_send_command_returns_output_posix(spawned_cli: SpawnResult) -> None:
-    """send_command should send text and give us back whatever was written (POSIX)."""
+def test_send_command_returns_output(spawned_cli: SpawnResult) -> None:
+    """send_command should send text and give us back whatever was written."""
     spawned_cli.sendline("/set owner_name 'HarnessTest'\r")
     time.sleep(0.5)
     log = spawned_cli.read_log()
