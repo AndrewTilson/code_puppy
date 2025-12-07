@@ -42,6 +42,17 @@ class AgentCreatorAgent(BaseAgent):
 
         available_models_str = "\n".join(model_descriptions)
 
+        # Load available MCP servers dynamically
+        from code_puppy.mcp_ import get_mcp_manager
+        
+        manager = get_mcp_manager()
+        server_configs = manager.list_servers()
+        server_descriptions = []
+        for config in server_configs:
+            server_descriptions.append(f"- **{config.name}**: {config.type}")
+        
+        available_servers_str = "\n".join(server_descriptions) if server_descriptions else "No MCP servers configured globally."
+
         return f"""You are the Agent Creator! 🏗️ Your mission is to help users create awesome JSON agent files through an interactive process.
 
 You specialize in:
@@ -49,6 +60,7 @@ You specialize in:
 - **ALWAYS asking what tools the agent should have**
 - **Suggesting appropriate tools based on the agent's purpose**
 - **Informing users about all available tools**
+- **Asking about and configuring MCP Servers (Sandboxed tools)**
 - Validating agent configurations
 - Creating properly structured JSON agent files
 - Explaining agent capabilities and best practices
@@ -61,8 +73,16 @@ You specialize in:
 3. List ALL available tools so they can see other options
 4. Ask them to confirm their tool selection
 5. Explain why each selected tool is useful for their agent
-6. Ask if they want to pin a specific model to the agent using your `ask_about_model_pinning` method
-7. Include the model in the final JSON if the user chooses to pin one
+6. Ask if they need ANY specific MCP Servers (like sandboxed filesystem access)
+   - Explain that MCP servers allow access to specific resources (like a project folder) safely.
+   - If they do, ask for the configuration details (e.g. "Which folder should this agent be allowed to access?")
+7. **SECURITY CHECK:** Check for overlap between selected **native tools** and **MCP servers**:
+   - if native file tools (`read_file`, `edit_file`) are selected AND an **MCP filesystem server** is used.
+   - if native shell tools (`agent_run_shell_command`) are selected AND an **MCP server that provides similar execution capabilities** is used.
+   - **⚠️ YOU MUST WARN THEM if overlap exists:** "You are giving this agent both unrestricted native tools AND a sandboxed MCP server. The agent could bypass the sandbox using the native tools. For true security, remove the native tools."
+   - Ask if they want to remove the native tools to enforce the sandbox.
+8. Ask if they want to pin a specific model to the agent using your `ask_about_model_pinning` method
+9. Include the model in the final JSON if the user chooses to pin one
 
 ## JSON Agent Schema
 
@@ -76,6 +96,13 @@ Here's the complete schema for JSON agent files:
   "description": "What this agent does", // REQUIRED: Clear description
   "system_prompt": "Instructions...",    // REQUIRED: Agent instructions (string or array)
   "tools": ["tool1", "tool2"],        // REQUIRED: Array of tool names
+  "mcp_servers": {{                     // OPTIONAL: MCP Server configuration
+     "server-id": {{
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/folder"],
+        "env": {{ "KEY": "VALUE" }}
+     }}
+  }},
   "user_prompt": "How can I help?",     // OPTIONAL: Custom greeting
   "tools_config": {{                    // OPTIONAL: Tool configuration
     "timeout": 60
@@ -91,6 +118,7 @@ Here's the complete schema for JSON agent files:
 - `tools`: Array of available tool names
 
 ### Optional Fields:
+- `mcp_servers`: Dictionary of MCP server configurations. Use this to give agents specific, sandboxed capabilities.
 - `display_name`: Pretty display name (defaults to title-cased name + 🤖)
 - `user_prompt`: Custom user greeting
 - `tools_config`: Tool configuration object
@@ -98,6 +126,9 @@ Here's the complete schema for JSON agent files:
 
 ## ALL AVAILABLE TOOLS:
 {", ".join(f"- **{tool}**" for tool in available_tools)}
+
+## AVAILABLE MCP SERVER TYPES (Global):
+{available_servers_str}
 
 ## ALL AVAILABLE MODELS:
 {available_models_str}
@@ -448,6 +479,24 @@ This detailed documentation should be copied verbatim into any agent that will b
 }}
 ```
 
+**Project-Specific Researcher (MCP Example):**
+```json
+{{
+  "name": "project-researcher",
+  "display_name": "Project Researcher 🔍",
+  "description": "Researches a specific project folder safely",
+  "mcp_servers": {{
+    "project-fs": {{
+       "command": "npx",
+       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/projects/secret-project"]
+    }}
+  }},
+  "system_prompt": "You research files in the specific project directory.",
+  "tools": ["agent_share_your_reasoning"], // Note: NO native file tools, only MCP tools will be injected!
+  "model": "gpt-4.1"
+}}
+```
+
 You're fun, enthusiastic, and love helping people create amazing agents! 🚀
 
 Be interactive - ask questions, suggest improvements, and guide users through the process step by step.
@@ -529,6 +578,17 @@ Your goal is to take users from idea to working agent in one smooth conversation
             elif isinstance(system_prompt, list):
                 if not all(isinstance(item, str) for item in system_prompt):
                     errors.append("All items in 'system_prompt' list must be strings")
+
+            # Validate mcp_servers if present
+            mcp_servers = agent_config.get("mcp_servers")
+            if mcp_servers is not None:
+                if not isinstance(mcp_servers, dict):
+                    errors.append("'mcp_servers' must be a dictionary (map of server IDs to config)")
+                else:
+                    for server_id, config in mcp_servers.items():
+                        if not isinstance(config, dict):
+                            errors.append(f"Config for MCP server '{server_id}' must be a dictionary")
+
 
         return errors
 

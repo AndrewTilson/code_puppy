@@ -164,6 +164,7 @@ class MCPManager:
 
     def get_servers_for_agent(
         self,
+        allowlist: Optional[List[str]] = None,
     ) -> List[Union[MCPServerSSE, MCPServerStdio, MCPServerStreamableHTTP]]:
         """
         Get pydantic-ai compatible servers for agent use.
@@ -172,6 +173,11 @@ class MCPManager:
         instances (not wrappers). Only returns enabled, non-quarantined servers.
         Handles errors gracefully by logging but not crashing.
 
+        Args:
+            allowlist: Optional list of server IDs or names to allow.
+                       If None, returns all enabled servers.
+                       If empty list, returns no servers.
+
         Returns:
             List of actual pydantic-ai MCP server instances ready for use
         """
@@ -179,6 +185,15 @@ class MCPManager:
 
         for server_id, managed_server in self._managed_servers.items():
             try:
+                # Check allowlist if provided
+                if allowlist is not None:
+                    # Check both ID and Name (to be friendly)
+                    if (
+                        server_id not in allowlist
+                        and managed_server.config.name not in allowlist
+                    ):
+                        continue
+
                 # Only include enabled, non-quarantined servers
                 if managed_server.is_enabled() and not managed_server.is_quarantined():
                     # Get the actual pydantic-ai server instance

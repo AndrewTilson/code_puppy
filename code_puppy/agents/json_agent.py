@@ -120,6 +120,13 @@ class JSONAgent(BaseAgent):
             result = super().get_model_name()
         return result
 
+    def get_allowed_mcp_servers(self) -> Optional[List[str]]:
+        """Get allowed MCP servers from JSON config.
+
+        Returns:
+            List of server names/IDs, or None if not specified (allow all).
+        """
+        return self._config.get("mcp_servers")
 
 def discover_json_agents() -> Dict[str, str]:
     """Discover JSON agent files in the user's agents directory.
@@ -146,3 +153,12 @@ def discover_json_agents() -> Dict[str, str]:
             continue
 
     return agents
+
+    def get_allowed_mcp_servers(self) -> Optional[List[str]]:
+        """Get allowed MCP servers from JSON config.
+
+        Returns:
+            List of server names/IDs, or None if not specified (allow all).
+        """
+        return self._config.get("mcp_servers")
+

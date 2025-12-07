@@ -997,6 +997,23 @@ class BaseAgent(ABC):
             return []
 
         manager = get_mcp_manager()
+    def register_agent_mcp_servers(self) -> None:
+        """Register agent-specific MCP servers.
+        
+        Override in subclasses to register custom MCP servers.
+        """
+        pass
+
+    def load_mcp_servers(self):
+        """Load configured MCP servers.
+
+        Loads configurations from the mcp_servers.yaml file and registers/updates
+        them with the MCP manager. Also registers agent-specific servers.
+        """
+        # First register any agent-specific servers (e.g. from JSON config)
+        self.register_agent_mcp_servers()
+
+        manager = get_mcp_manager()
         configs = load_mcp_server_configs()
         if not configs:
             existing_servers = manager.list_servers()
@@ -1021,7 +1038,7 @@ class BaseAgent(ABC):
                 except Exception:
                     continue
 
-        return manager.get_servers_for_agent()
+        return manager.get_servers_for_agent(allowlist=self.get_allowed_mcp_servers())
 
     def reload_mcp_servers(self):
         """Reload MCP servers and return updated servers."""
@@ -1029,7 +1046,7 @@ class BaseAgent(ABC):
         self._mcp_tool_definitions_cache = []
         self.load_mcp_servers()
         manager = get_mcp_manager()
-        return manager.get_servers_for_agent()
+        return manager.get_servers_for_agent(allowlist=self.get_allowed_mcp_servers())
 
     def _load_model_with_fallback(
         self,
