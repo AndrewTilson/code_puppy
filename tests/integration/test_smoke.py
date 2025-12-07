@@ -20,11 +20,12 @@ def test_version_smoke() -> None:
 
 def test_help_smoke() -> None:
     child = spawn_cli(["code-puppy", "--help"])
-    child.expect("--version", timeout=10)
+    child.expect("--help", timeout=10)
     child.expect(pexpect.EOF, timeout=10)
     output = child.before
-    assert "show version and exit" in output.lower()
+    assert "show this help message" in output.lower()
     print("\n[SMOKE] help output seen")
+
 
 
 def test_interactive_smoke() -> None:
