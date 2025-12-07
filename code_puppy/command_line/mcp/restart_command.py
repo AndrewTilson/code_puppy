@@ -65,9 +65,12 @@ class RestartCommand(MCPCommandBase):
 
                     # Reload the agent to pick up the server changes
                     try:
-                        from code_puppy.agent import get_code_generation_agent
+                        from code_puppy.agents import get_current_agent
 
-                        get_code_generation_agent(force_reload=True)
+                        agent = get_current_agent()
+                        agent.reload_code_generation_agent()
+                        # Update MCP tool cache immediately so token counts reflect the change
+                        agent.update_mcp_tool_cache_sync()
                         emit_info(
                             "[dim]Agent reloaded with updated servers[/dim]",
                             message_group=group_id,

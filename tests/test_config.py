@@ -280,6 +280,7 @@ class TestGetConfigKeys:
             [
                 "allow_recursion",
                 "auto_save_session",
+                "cancel_agent_key",
                 "compaction_strategy",
                 "compaction_threshold",
                 "default_agent",
@@ -292,7 +293,9 @@ class TestGetConfigKeys:
                 "message_limit",
                 "model",
                 "openai_reasoning_effort",
+                "openai_verbosity",
                 "protected_token_count",
+                "temperature",
                 "yolo_mode",
             ]
         )
@@ -311,6 +314,7 @@ class TestGetConfigKeys:
             [
                 "allow_recursion",
                 "auto_save_session",
+                "cancel_agent_key",
                 "compaction_strategy",
                 "compaction_threshold",
                 "default_agent",
@@ -321,7 +325,9 @@ class TestGetConfigKeys:
                 "message_limit",
                 "model",
                 "openai_reasoning_effort",
+                "openai_verbosity",
                 "protected_token_count",
+                "temperature",
                 "yolo_mode",
             ]
         )
@@ -560,25 +566,35 @@ class TestCommandHistory:
         # No other function should be called since file exists
 
     @patch("builtins.open", new_callable=mock_open)
-    @patch("datetime.datetime")
-    def test_save_command_to_history_with_timestamp(
-        self, mock_datetime, mock_file, mock_config_paths
-    ):
+    def test_save_command_to_history_with_timestamp(self, mock_file, mock_config_paths):
         # Setup
         mock_cfg_dir, mock_cfg_file = mock_config_paths
-        mock_now = MagicMock()
-        mock_now.isoformat.return_value = "2023-01-01T12:34:56"
-        mock_datetime.now.return_value = mock_now
 
         # Call the function
         cp_config.save_command_to_history("test command")
 
-        # Assert
-        mock_file.assert_called_once_with(cp_config.COMMAND_HISTORY_FILE, "a")
-        mock_file().write.assert_called_once_with(
-            "\n# 2023-01-01T12:34:56\ntest command\n"
+        # Assert - now using encoding and errors parameters
+        mock_file.assert_called_once_with(
+            cp_config.COMMAND_HISTORY_FILE,
+            "a",
+            encoding="utf-8",
+            errors="surrogateescape",
         )
-        mock_now.isoformat.assert_called_once_with(timespec="seconds")
+
+        # Verify the write call was made with the correct format
+        # The timestamp is dynamic, so we check the format rather than exact value
+        write_call_args = mock_file().write.call_args[0][0]
+        assert write_call_args.startswith("\n# ")
+        assert write_call_args.endswith("\ntest command\n")
+        # Check timestamp format is ISO-like (YYYY-MM-DDTHH:MM:SS)
+        import re
+
+        timestamp_match = re.search(
+            r"# (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", write_call_args
+        )
+        assert timestamp_match is not None, (
+            f"Timestamp format not found in: {write_call_args}"
+        )
 
     @patch("builtins.open")
     @patch("rich.console.Console")
@@ -713,3 +729,128 @@ class TestDefaultModelSelection:
         # it should fall back to the preferred model ("synthetic-GLM-4.6")
         assert result == "synthetic-GLM-4.6"
         mock_get_value.assert_called_once_with("model")
+
+
+class TestTemperatureConfig:
+    """Tests for the temperature configuration functions."""
+
+    @patch("code_puppy.config.get_value")
+    def test_get_temperature_returns_none_when_not_set(self, mock_get_value):
+        """Temperature should return None when not configured."""
+        mock_get_value.return_value = None
+        result = cp_config.get_temperature()
+        assert result is None
+        mock_get_value.assert_called_once_with("temperature")
+
+    @patch("code_puppy.config.get_value")
+    def test_get_temperature_returns_none_for_empty_string(self, mock_get_value):
+        """Temperature should return None for empty string."""
+        mock_get_value.return_value = ""
+        result = cp_config.get_temperature()
+        assert result is None
+
+    @patch("code_puppy.config.get_value")
+    def test_get_temperature_returns_float_value(self, mock_get_value):
+        """Temperature should return a float when set."""
+        mock_get_value.return_value = "0.7"
+        result = cp_config.get_temperature()
+        assert result == 0.7
+        assert isinstance(result, float)
+
+    @patch("code_puppy.config.get_value")
+    def test_get_temperature_clamps_to_max(self, mock_get_value):
+        """Temperature should be clamped to max 2.0."""
+        mock_get_value.return_value = "5.0"
+        result = cp_config.get_temperature()
+        assert result == 2.0
+
+    @patch("code_puppy.config.get_value")
+    def test_get_temperature_clamps_to_min(self, mock_get_value):
+        """Temperature should be clamped to min 0.0."""
+        mock_get_value.return_value = "-1.0"
+        result = cp_config.get_temperature()
+        assert result == 0.0
+
+    @patch("code_puppy.config.get_value")
+    def test_get_temperature_handles_invalid_value(self, mock_get_value):
+        """Temperature should return None for invalid values."""
+        mock_get_value.return_value = "not_a_number"
+        result = cp_config.get_temperature()
+        assert result is None
+
+    @patch("code_puppy.config.set_config_value")
+    def test_set_temperature_with_value(self, mock_set_config_value):
+        """Setting temperature should store it as a string."""
+        cp_config.set_temperature(0.7)
+        mock_set_config_value.assert_called_once_with("temperature", "0.7")
+
+    @patch("code_puppy.config.set_config_value")
+    def test_set_temperature_clamps_value(self, mock_set_config_value):
+        """Setting temperature should clamp out-of-range values."""
+        cp_config.set_temperature(5.0)
+        mock_set_config_value.assert_called_once_with("temperature", "2.0")
+
+    @patch("code_puppy.config.set_config_value")
+    def test_set_temperature_to_none_clears_value(self, mock_set_config_value):
+        """Setting temperature to None should clear it."""
+        cp_config.set_temperature(None)
+        mock_set_config_value.assert_called_once_with("temperature", "")
+
+    def test_temperature_in_config_keys(self):
+        """Temperature should be in the list of config keys."""
+        keys = cp_config.get_config_keys()
+        assert "temperature" in keys
+
+
+class TestModelSupportsSetting:
+    """Tests for the model_supports_setting function."""
+
+    @patch("code_puppy.model_factory.ModelFactory.load_config")
+    def test_returns_true_when_setting_in_supported_list(self, mock_load_config):
+        """Should return True when setting is in supported_settings."""
+        mock_load_config.return_value = {
+            "test-model": {
+                "type": "openai",
+                "name": "test-model",
+                "supported_settings": ["temperature", "seed"],
+            }
+        }
+        assert cp_config.model_supports_setting("test-model", "temperature") is True
+        assert cp_config.model_supports_setting("test-model", "seed") is True
+
+    @patch("code_puppy.model_factory.ModelFactory.load_config")
+    def test_returns_false_when_setting_not_in_supported_list(self, mock_load_config):
+        """Should return False when setting is not in supported_settings."""
+        mock_load_config.return_value = {
+            "test-model": {
+                "type": "openai",
+                "name": "test-model",
+                "supported_settings": ["seed"],  # No temperature
+            }
+        }
+        assert cp_config.model_supports_setting("test-model", "temperature") is False
+
+    @patch("code_puppy.model_factory.ModelFactory.load_config")
+    def test_defaults_to_true_when_no_supported_settings(self, mock_load_config):
+        """Should default to True for backwards compatibility."""
+        mock_load_config.return_value = {
+            "test-model": {
+                "type": "openai",
+                "name": "test-model",
+                # No supported_settings field
+            }
+        }
+        assert cp_config.model_supports_setting("test-model", "temperature") is True
+        assert cp_config.model_supports_setting("test-model", "seed") is True
+
+    @patch("code_puppy.model_factory.ModelFactory.load_config")
+    def test_returns_true_on_exception(self, mock_load_config):
+        """Should return True when there's an exception loading config."""
+        mock_load_config.side_effect = Exception("Config load failed")
+        assert cp_config.model_supports_setting("test-model", "temperature") is True
+
+    @patch("code_puppy.model_factory.ModelFactory.load_config")
+    def test_returns_true_for_unknown_model(self, mock_load_config):
+        """Should default to True for unknown models."""
+        mock_load_config.return_value = {}
+        assert cp_config.model_supports_setting("unknown-model", "temperature") is True

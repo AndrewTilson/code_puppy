@@ -43,6 +43,38 @@ except ImportError:
     console = Console(no_color=NO_COLOR)
 
 
+def should_suppress_browser() -> bool:
+    """Check if browsers should be suppressed (headless mode).
+
+    Returns:
+        True if browsers should be suppressed, False if they can open normally
+
+    This respects multiple headless mode controls:
+    - HEADLESS=true environment variable (suppresses ALL browsers)
+    - BROWSER_HEADLESS=true environment variable (for browser automation)
+    - CI=true environment variable (continuous integration)
+    - PYTEST_CURRENT_TEST environment variable (running under pytest)
+    """
+    # Explicit headless mode
+    if os.getenv("HEADLESS", "").lower() == "true":
+        return True
+
+    # Browser-specific headless mode
+    if os.getenv("BROWSER_HEADLESS", "").lower() == "true":
+        return True
+
+    # Continuous integration environments
+    if os.getenv("CI", "").lower() == "true":
+        return True
+
+    # Running under pytest
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return True
+
+    # Default to allowing browsers
+    return False
+
+
 # -------------------
 # Shared ignore patterns/helpers
 # Split into directory vs file patterns so tools can choose appropriately
@@ -750,7 +782,7 @@ def format_diff_with_colors(diff_text: str) -> Text:
 
     # Always use beautiful syntax highlighting!
     if not PYGMENTS_AVAILABLE:
-        console.log(
+        console.print(
             "[yellow]Warning: Pygments not available, diffs will look plain[/yellow]"
         )
         # Return plain text as fallback
@@ -1106,13 +1138,6 @@ def get_user_approval(
 
     finally:
         set_awaiting_user_input(False)
-        # Explicitly resume spinners
-        try:
-            from code_puppy.messaging.spinner import resume_all_spinners
-
-            resume_all_spinners()
-        except (ImportError, Exception):
-            pass
 
         # Force Rich console to reset display state to prevent artifacts
         try:
@@ -1126,10 +1151,8 @@ def get_user_approval(
         # Ensure streams are flushed
         sys.stdout.flush()
         sys.stderr.flush()
-        # Add small delay to let spinner stabilize
-        time.sleep(0.1)
 
-    # Show result with explicit cursor reset
+    # Show result BEFORE resuming spinners (no puppy litter!)
     console.print()
     if not confirmed:
         if user_feedback:
@@ -1141,6 +1164,14 @@ def get_user_approval(
             console.print("[bold red]✗ Rejected.[/bold red]")
     else:
         console.print("[bold green]✓ Approved![/bold green]")
+
+    # NOW resume spinners after showing the result
+    try:
+        from code_puppy.messaging.spinner import resume_all_spinners
+
+        resume_all_spinners()
+    except (ImportError, Exception):
+        pass
 
     return confirmed, user_feedback
 
@@ -1277,13 +1308,6 @@ async def get_user_approval_async(
 
     finally:
         set_awaiting_user_input(False)
-        # Explicitly resume spinners
-        try:
-            from code_puppy.messaging.spinner import resume_all_spinners
-
-            resume_all_spinners()
-        except (ImportError, Exception):
-            pass
 
         # Force Rich console to reset display state to prevent artifacts
         try:
@@ -1297,10 +1321,8 @@ async def get_user_approval_async(
         # Ensure streams are flushed
         sys.stdout.flush()
         sys.stderr.flush()
-        # Add small delay to let spinner stabilize
-        await asyncio.sleep(0.1)
 
-    # Show result with explicit cursor reset
+    # Show result BEFORE resuming spinners (no puppy litter!)
     console.print()
     if not confirmed:
         if user_feedback:
@@ -1312,6 +1334,14 @@ async def get_user_approval_async(
             console.print("[bold red]✗ Rejected.[/bold red]")
     else:
         console.print("[bold green]✓ Approved![/bold green]")
+
+    # NOW resume spinners after showing the result
+    try:
+        from code_puppy.messaging.spinner import resume_all_spinners
+
+        resume_all_spinners()
+    except (ImportError, Exception):
+        pass
 
     return confirmed, user_feedback
 
@@ -1340,9 +1370,10 @@ def _find_best_window(
             best_span = (i, i + win_size)
             best_window = window
 
-    console.log(f"Best span: {best_span}")
-    console.log(f"Best window: {best_window}")
-    console.log(f"Best score: {best_score}")
+    # Debug logging
+    console.log(best_span)
+    console.log(best_window)
+    console.log(best_score)
     return best_span, best_score
 
 

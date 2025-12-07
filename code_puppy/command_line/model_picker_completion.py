@@ -28,6 +28,8 @@ def set_active_model(model_name: str):
     """
     Sets the active model name by updating the config (for persistence).
     """
+    from code_puppy.messaging import emit_info, emit_warning
+
     set_model_name(model_name)
     # Reload the currently active agent so the new model takes effect immediately
     try:
@@ -42,9 +44,9 @@ def set_active_model(model_name: str):
                 # Non-fatal, continue to reload
                 ...
         current_agent.reload_code_generation_agent()
-    except Exception:
-        # Swallow errors to avoid breaking the prompt flow; model persists for next run
-        pass
+        emit_info("Active agent reloaded")
+    except Exception as e:
+        emit_warning(f"Model changed but agent reload failed: {e}")
 
 
 class ModelNameCompleter(Completer):
@@ -99,38 +101,33 @@ class ModelNameCompleter(Completer):
 def update_model_in_input(text: str) -> Optional[str]:
     # If input starts with /model or /m and a model name, set model and strip it out
     content = text.strip()
-
-    # Check for /model command (require space after /model, case-insensitive)
-    import re
+    model_names = load_model_names()
 
     # Check for /model command (require space after /model, case-insensitive)
     if content.lower().startswith("/model "):
         # Find the actual /model command (case-insensitive)
         model_cmd = content.split(" ", 1)[0]  # Get the command part
         rest = content[len(model_cmd) :].strip()  # Remove the actual command
-        model_names = load_model_names()
+
+        # Look for a model name at the start of rest (case-insensitive)
         for model in model_names:
-            # Check if rest starts with model name (case-insensitive)
-            # Use regex to ensure word boundary if model name doesn't end with symbol
-            # But model names often contain hyphens.
-            # Simple check: rest matches model exactly OR rest starts with model + space
-            is_match = False
-            if rest.lower() == model.lower():
-                is_match = True
-            elif rest.lower().startswith(model.lower() + " "):
-                is_match = True
-            
-            if is_match:
+            if rest.lower().startswith(model.lower()):
+                # Found a matching model - now extract it properly
                 set_active_model(model)
-                # Remove the actual /model command and model match from the input
-                # Pattern: command + spaces + model + optional spaces
-                pattern = re.compile(re.escape(model_cmd) + r"\s+" + re.escape(model), re.IGNORECASE)
-                match = pattern.match(text)
-                if match:
-                   new_text = text[match.end() :].strip()
-                   return new_text
-                # Fallback
-                return ""
+
+                # Find the actual model name in the original text (preserving case)
+                # We need to find where the model ends in the original rest string
+                model_end_idx = len(model)
+
+                # Build the full command+model part to remove
+                cmd_and_model_pattern = model_cmd + " " + rest[:model_end_idx]
+                idx = text.find(cmd_and_model_pattern)
+                if idx != -1:
+                    new_text = (
+                        text[:idx] + text[idx + len(cmd_and_model_pattern) :]
+                    ).strip()
+                    return new_text
+                return None
 
     # Check for /m command (case-insensitive)
     elif content.lower().startswith("/m ") and not content.lower().startswith(
@@ -139,24 +136,27 @@ def update_model_in_input(text: str) -> Optional[str]:
         # Find the actual /m command (case-insensitive)
         m_cmd = content.split(" ", 1)[0]  # Get the command part
         rest = content[len(m_cmd) :].strip()  # Remove the actual command
-        model_names = load_model_names()
-        for model in model_names:
-             # Check if rest starts with model name (case-insensitive)
-            is_match = False
-            if rest.lower() == model.lower():
-                is_match = True
-            elif rest.lower().startswith(model.lower() + " "):
-                is_match = True
 
-            if is_match:
+        # Look for a model name at the start of rest (case-insensitive)
+        for model in model_names:
+            if rest.lower().startswith(model.lower()):
+                # Found a matching model - now extract it properly
                 set_active_model(model)
-                # Remove the actual /m command and model (preserves case and spacing)
-                pattern = re.compile(re.escape(m_cmd) + r"\s+" + re.escape(model), re.IGNORECASE)
-                match = pattern.match(text)
-                if match:
-                   new_text = text[match.end() :].strip()
-                   return new_text
-                return ""
+
+                # Find the actual model name in the original text (preserving case)
+                # We need to find where the model ends in the original rest string
+                model_end_idx = len(model)
+
+                # Build the full command+model part to remove
+                # Handle space variations in the original text
+                cmd_and_model_pattern = m_cmd + " " + rest[:model_end_idx]
+                idx = text.find(cmd_and_model_pattern)
+                if idx != -1:
+                    new_text = (
+                        text[:idx] + text[idx + len(cmd_and_model_pattern) :]
+                    ).strip()
+                    return new_text
+                return None
 
     return None
 

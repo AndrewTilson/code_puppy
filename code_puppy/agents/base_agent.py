@@ -33,8 +33,6 @@ from pydantic_ai.messages import (
     ToolReturn,
     ToolReturnPart,
 )
-from pydantic_ai.models.openai import OpenAIChatModelSettings
-from pydantic_ai.settings import ModelSettings
 
 # Consolidated relative imports
 from code_puppy.config import (
@@ -43,12 +41,13 @@ from code_puppy.config import (
     get_compaction_threshold,
     get_global_model_name,
     get_message_limit,
-    get_openai_reasoning_effort,
     get_protected_token_count,
     get_use_dbos,
     get_value,
     load_mcp_server_configs,
 )
+from code_puppy.keymap import cancel_agent_uses_signal, get_cancel_agent_char_code
+from code_puppy.error_logging import log_error
 from code_puppy.mcp_ import ServerConfig, get_mcp_manager
 from code_puppy.messaging import (
     emit_error,
@@ -59,7 +58,7 @@ from code_puppy.messaging.spinner import (
     SpinnerBase,
     update_spinner_context,
 )
-from code_puppy.model_factory import ModelFactory
+from code_puppy.model_factory import ModelFactory, make_model_settings
 from code_puppy.summarization_agent import run_summarization_sync
 from code_puppy.tools.agent_tools import _active_subagent_tasks
 from code_puppy.tools.command_runner import (
@@ -85,6 +84,9 @@ class BaseAgent(ABC):
         # Puppy rules loaded lazily
         self._puppy_rules: Optional[str] = None
         self.cur_model: pydantic_ai.models.Model
+        # Cache for MCP tool definitions (for token estimation)
+        # This is populated after the first successful run when MCP tools are retrieved
+        self._mcp_tool_definitions_cache: List[Dict[str, Any]] = []
 
     @property
     @abstractmethod
@@ -340,6 +342,159 @@ class BaseAgent(ABC):
                 total_tokens += self.estimate_token_count(part_str)
 
         return max(1, total_tokens)
+
+    def estimate_context_overhead_tokens(self) -> int:
+        """
+        Estimate the token overhead from system prompt and tool definitions.
+
+        This accounts for tokens that are always present in the context:
+        - System prompt (for non-Claude-Code models)
+        - Tool definitions (name, description, parameter schema)
+        - MCP tool definitions
+
+        Note: For Claude Code models, the system prompt is prepended to the first
+        user message, so it's already counted in the message history tokens.
+        We only count the short fixed instructions for Claude Code models.
+        """
+        total_tokens = 0
+
+        # 1. Estimate tokens for system prompt / instructions
+        # For Claude Code models, the full system prompt is prepended to the first
+        # user message (already in message history), so we only count the short
+        # fixed instructions. For other models, count the full system prompt.
+        try:
+            from code_puppy.model_utils import (
+                get_claude_code_instructions,
+                is_claude_code_model,
+            )
+
+            model_name = (
+                self.get_model_name() if hasattr(self, "get_model_name") else ""
+            )
+            if is_claude_code_model(model_name):
+                # For Claude Code models, only count the short fixed instructions
+                # The full system prompt is already in the message history
+                instructions = get_claude_code_instructions()
+                total_tokens += self.estimate_token_count(instructions)
+            else:
+                # For other models, count the full system prompt
+                system_prompt = self.get_system_prompt()
+                if system_prompt:
+                    total_tokens += self.estimate_token_count(system_prompt)
+        except Exception:
+            pass  # If we can't get system prompt, skip it
+
+        # 2. Estimate tokens for pydantic_agent tool definitions
+        pydantic_agent = getattr(self, "pydantic_agent", None)
+        if pydantic_agent:
+            tools = getattr(pydantic_agent, "_tools", None)
+            if tools and isinstance(tools, dict):
+                for tool_name, tool_func in tools.items():
+                    try:
+                        # Estimate tokens from tool name
+                        total_tokens += self.estimate_token_count(tool_name)
+
+                        # Estimate tokens from tool description
+                        description = getattr(tool_func, "__doc__", None) or ""
+                        if description:
+                            total_tokens += self.estimate_token_count(description)
+
+                        # Estimate tokens from parameter schema
+                        # Tools may have a schema attribute or we can try to get it from annotations
+                        schema = getattr(tool_func, "schema", None)
+                        if schema:
+                            schema_str = (
+                                json.dumps(schema)
+                                if isinstance(schema, dict)
+                                else str(schema)
+                            )
+                            total_tokens += self.estimate_token_count(schema_str)
+                        else:
+                            # Try to get schema from function annotations
+                            annotations = getattr(tool_func, "__annotations__", None)
+                            if annotations:
+                                total_tokens += self.estimate_token_count(
+                                    str(annotations)
+                                )
+                    except Exception:
+                        continue  # Skip tools we can't process
+
+        # 3. Estimate tokens for MCP tool definitions from cache
+        # MCP tools are fetched asynchronously, so we use a cache that's populated
+        # after the first successful run. See _update_mcp_tool_cache() method.
+        mcp_tool_cache = getattr(self, "_mcp_tool_definitions_cache", [])
+        if mcp_tool_cache:
+            for tool_def in mcp_tool_cache:
+                try:
+                    # Estimate tokens from tool name
+                    tool_name = tool_def.get("name", "")
+                    if tool_name:
+                        total_tokens += self.estimate_token_count(tool_name)
+
+                    # Estimate tokens from tool description
+                    description = tool_def.get("description", "")
+                    if description:
+                        total_tokens += self.estimate_token_count(description)
+
+                    # Estimate tokens from parameter schema (inputSchema)
+                    input_schema = tool_def.get("inputSchema")
+                    if input_schema:
+                        schema_str = (
+                            json.dumps(input_schema)
+                            if isinstance(input_schema, dict)
+                            else str(input_schema)
+                        )
+                        total_tokens += self.estimate_token_count(schema_str)
+                except Exception:
+                    continue  # Skip tools we can't process
+
+        return total_tokens
+
+    async def _update_mcp_tool_cache(self) -> None:
+        """
+        Update the MCP tool definitions cache by fetching tools from running MCP servers.
+
+        This should be called after a successful run to populate the cache for
+        accurate token estimation in subsequent runs.
+        """
+        mcp_servers = getattr(self, "_mcp_servers", None)
+        if not mcp_servers:
+            return
+
+        tool_definitions = []
+        for mcp_server in mcp_servers:
+            try:
+                # Check if the server has list_tools method (pydantic-ai MCP servers)
+                if hasattr(mcp_server, "list_tools"):
+                    # list_tools() returns list[mcp_types.Tool]
+                    tools = await mcp_server.list_tools()
+                    for tool in tools:
+                        tool_def = {
+                            "name": getattr(tool, "name", ""),
+                            "description": getattr(tool, "description", ""),
+                            "inputSchema": getattr(tool, "inputSchema", {}),
+                        }
+                        tool_definitions.append(tool_def)
+            except Exception:
+                # Server might not be running or accessible, skip it
+                continue
+
+        self._mcp_tool_definitions_cache = tool_definitions
+
+    def update_mcp_tool_cache_sync(self) -> None:
+        """
+        Synchronously clear the MCP tool cache.
+
+        This clears the cache so that token counts will be recalculated on the next
+        agent run. Call this after starting/stopping MCP servers.
+
+        Note: We don't try to fetch tools synchronously because MCP servers require
+        async context management that doesn't work well from sync code. The cache
+        will be repopulated on the next successful agent run.
+        """
+        # Simply clear the cache - it will be repopulated on the next agent run
+        # This is safer than trying to call async methods from sync context
+        self._mcp_tool_definitions_cache = []
 
     def _is_tool_call_part(self, part: Any) -> bool:
         if isinstance(part, (ToolCallPart, ToolCallPartDelta)):
@@ -669,9 +824,9 @@ class BaseAgent(ABC):
         # First, prune any interrupted/mismatched tool-call conversations
         model_max = self.get_model_context_length()
 
-        total_current_tokens = sum(
-            self.estimate_tokens_for_message(msg) for msg in messages
-        )
+        message_tokens = sum(self.estimate_tokens_for_message(msg) for msg in messages)
+        context_overhead = self.estimate_context_overhead_tokens()
+        total_current_tokens = message_tokens + context_overhead
         proportion_used = total_current_tokens / model_max
 
         # Check if we're in TUI mode and can update the status bar
@@ -830,9 +985,8 @@ class BaseAgent(ABC):
         for path_str in possible_paths:
             puppy_rules_path = Path(path_str)
             if puppy_rules_path.exists():
-                with open(puppy_rules_path, "r") as f:
-                    self._puppy_rules = f.read()
-                    break
+                self._puppy_rules = puppy_rules_path.read_text(encoding="utf-8-sig")
+                break
         return self._puppy_rules
 
     def load_mcp_servers(self, extra_headers: Optional[Dict[str, str]] = None):
@@ -871,6 +1025,8 @@ class BaseAgent(ABC):
 
     def reload_mcp_servers(self):
         """Reload MCP servers and return updated servers."""
+        # Clear the MCP tool cache when servers are reloaded
+        self._mcp_tool_definitions_cache = []
         self.load_mcp_servers()
         manager = get_mcp_manager()
         return manager.get_servers_for_agent()
@@ -955,22 +1111,21 @@ class BaseAgent(ABC):
 
         mcp_servers = self.load_mcp_servers()
 
-        model_settings_dict: Dict[str, Any] = {"seed": 42}
         output_tokens = max(
             2048,
             min(int(0.05 * self.get_model_context_length()) - 1024, 16384),
         )
-        model_settings_dict["max_tokens"] = output_tokens
+        model_settings = make_model_settings(
+            resolved_model_name, max_tokens=output_tokens
+        )
 
-        model_settings: ModelSettings = ModelSettings(**model_settings_dict)
-        if "gpt-5" in model_name:
-            model_settings_dict["openai_reasoning_effort"] = (
-                get_openai_reasoning_effort()
-            )
-            model_settings = OpenAIChatModelSettings(**model_settings_dict)
+        # Handle claude-code models: swap instructions (prompt prepending happens in run_with_mcp)
+        from code_puppy.model_utils import prepare_prompt_for_model
 
-        if model_name.startswith("claude-code"):
-            instructions = "You are Claude Code, Anthropic's official CLI for Claude."
+        prepared = prepare_prompt_for_model(
+            model_name, instructions, "", prepend_system_to_user=False
+        )
+        instructions = prepared.instructions
 
         self.cur_model = model
         p_agent = PydanticAgent(
@@ -1121,8 +1276,19 @@ class BaseAgent(ABC):
         self,
         stop_event: threading.Event,
         on_escape: Callable[[], None],
+        on_cancel_agent: Optional[Callable[[], None]] = None,
     ) -> Optional[threading.Thread]:
-        """Start a Ctrl+X key listener thread for CLI sessions."""
+        """Start a keyboard listener thread for CLI sessions.
+
+        Listens for Ctrl+X (shell command cancel) and optionally the configured
+        cancel_agent_key (when not using SIGINT/Ctrl+C).
+
+        Args:
+            stop_event: Event to signal the listener to stop.
+            on_escape: Callback for Ctrl+X (shell command cancel).
+            on_cancel_agent: Optional callback for cancel_agent_key (only used
+                when cancel_agent_uses_signal() returns False).
+        """
         try:
             import sys
         except ImportError:
@@ -1140,16 +1306,16 @@ class BaseAgent(ABC):
         def listener() -> None:
             try:
                 if sys.platform.startswith("win"):
-                    self._listen_for_ctrl_x_windows(stop_event, on_escape)
+                    self._listen_for_ctrl_x_windows(stop_event, on_escape, on_cancel_agent)
                 else:
-                    self._listen_for_ctrl_x_posix(stop_event, on_escape)
+                    self._listen_for_ctrl_x_posix(stop_event, on_escape, on_cancel_agent)
             except Exception:
                 emit_warning(
-                    "Ctrl+X key listener stopped unexpectedly; press Ctrl+C to cancel."
+                    "Key listener stopped unexpectedly; press Ctrl+C to cancel."
                 )
 
         thread = threading.Thread(
-            target=listener, name="code-puppy-esc-listener", daemon=True
+            target=listener, name="code-puppy-key-listener", daemon=True
         )
         thread.start()
         return thread
@@ -1158,9 +1324,15 @@ class BaseAgent(ABC):
         self,
         stop_event: threading.Event,
         on_escape: Callable[[], None],
+        on_cancel_agent: Optional[Callable[[], None]] = None,
     ) -> None:
         import msvcrt
         import time
+
+        # Get the cancel agent char code if we're using keyboard-based cancel
+        cancel_agent_char: Optional[str] = None
+        if on_cancel_agent is not None and not cancel_agent_uses_signal():
+            cancel_agent_char = get_cancel_agent_char_code()
 
         while not stop_event.is_set():
             try:
@@ -1173,9 +1345,16 @@ class BaseAgent(ABC):
                             emit_warning(
                                 "Ctrl+X handler raised unexpectedly; Ctrl+C still works."
                             )
+                    elif cancel_agent_char and on_cancel_agent and key == cancel_agent_char:
+                        try:
+                            on_cancel_agent()
+                        except Exception:
+                            emit_warning(
+                                "Cancel agent handler raised unexpectedly."
+                            )
             except Exception:
                 emit_warning(
-                    "Windows Ctrl+X listener error; Ctrl+C is still available for cancel."
+                    "Windows key listener error; Ctrl+C is still available for cancel."
                 )
                 return
             time.sleep(0.05)
@@ -1184,11 +1363,17 @@ class BaseAgent(ABC):
         self,
         stop_event: threading.Event,
         on_escape: Callable[[], None],
+        on_cancel_agent: Optional[Callable[[], None]] = None,
     ) -> None:
         import select
         import sys
         import termios
         import tty
+
+        # Get the cancel agent char code if we're using keyboard-based cancel
+        cancel_agent_char: Optional[str] = None
+        if on_cancel_agent is not None and not cancel_agent_uses_signal():
+            cancel_agent_char = get_cancel_agent_char_code()
 
         stdin = sys.stdin
         try:
@@ -1219,6 +1404,13 @@ class BaseAgent(ABC):
                         emit_warning(
                             "Ctrl+X handler raised unexpectedly; Ctrl+C still works."
                         )
+                elif cancel_agent_char and on_cancel_agent and data == cancel_agent_char:
+                    try:
+                        on_cancel_agent()
+                    except Exception:
+                        emit_warning(
+                            "Cancel agent handler raised unexpectedly."
+                        )
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, original_attrs)
 
@@ -1244,12 +1436,29 @@ class BaseAgent(ABC):
         Raises:
             asyncio.CancelledError: When execution is cancelled by user.
         """
+        # Sanitize prompt to remove invalid Unicode surrogates that can cause
+        # encoding errors (especially common on Windows with copy-paste)
+        if prompt:
+            try:
+                prompt = prompt.encode("utf-8", errors="surrogatepass").decode(
+                    "utf-8", errors="replace"
+                )
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                # Fallback: filter out surrogate characters directly
+                prompt = "".join(
+                    char if ord(char) < 0xD800 or ord(char) > 0xDFFF else "\ufffd"
+                    for char in prompt
+                )
+
         group_id = str(uuid.uuid4())
         # Avoid double-loading: reuse existing agent if already built
         pydantic_agent = (
             self._code_generation_agent or self.reload_code_generation_agent()
         )
-        if self.get_model_name().startswith("claude-code"):
+        # Handle claude-code models: prepend system prompt to first user message
+        from code_puppy.model_utils import is_claude_code_model
+
+        if is_claude_code_model(self.get_model_name()):
             if len(self.get_message_history()) == 0:
                 prompt = self.get_system_prompt() + "\n\n" + prompt
 
@@ -1366,6 +1575,12 @@ class BaseAgent(ABC):
                         remaining_exceptions.append(exc)
                         emit_info(f"Unexpected error: {str(exc)}", group_id=group_id)
                         emit_info(f"{str(exc.args)}", group_id=group_id)
+                        # Log to file for debugging
+                        log_error(
+                            exc,
+                            context=f"Agent run (group_id={group_id})",
+                            include_traceback=True,
+                        )
 
                 collect_non_cancelled_exceptions(other_error)
 
@@ -1424,13 +1639,48 @@ class BaseAgent(ABC):
 
             schedule_agent_cancel()
 
+        def graceful_sigint_handler(_sig, _frame):
+            # When using keyboard-based cancel, SIGINT should be a no-op
+            # (just show a hint to user about the configured cancel key)
+            from code_puppy.keymap import get_cancel_agent_display_name
+
+            cancel_key = get_cancel_agent_display_name()
+            emit_info(f"Use {cancel_key} to cancel the agent task.")
+
         original_handler = None
+        key_listener_stop_event = None
+        key_listener_thread = None
+
         try:
-            # Save original handler and set our custom one AFTER task is created
-            original_handler = signal.signal(signal.SIGINT, keyboard_interrupt_handler)
+            if cancel_agent_uses_signal():
+                # Use SIGINT-based cancellation (default Ctrl+C behavior)
+                original_handler = signal.signal(
+                    signal.SIGINT, keyboard_interrupt_handler
+                )
+            else:
+                # Use keyboard listener for agent cancellation
+                # Set a graceful SIGINT handler that shows a hint
+                original_handler = signal.signal(
+                    signal.SIGINT, graceful_sigint_handler
+                )
+                # Spawn keyboard listener with the cancel agent callback
+                key_listener_stop_event = threading.Event()
+                key_listener_thread = self._spawn_ctrl_x_key_listener(
+                    key_listener_stop_event,
+                    on_escape=lambda: None,  # Ctrl+X handled by command_runner
+                    on_cancel_agent=schedule_agent_cancel,
+                )
 
             # Wait for the task to complete or be cancelled
             result = await agent_task
+
+            # Update MCP tool cache after successful run for accurate token estimation
+            if hasattr(self, "_mcp_servers") and self._mcp_servers:
+                try:
+                    await self._update_mcp_tool_cache()
+                except Exception:
+                    pass  # Don't fail the run if cache update fails
+
             return result
         except asyncio.CancelledError:
             agent_task.cancel()
@@ -1439,6 +1689,9 @@ class BaseAgent(ABC):
             if not agent_task.done():
                 agent_task.cancel()
         finally:
+            # Stop keyboard listener if it was started
+            if key_listener_stop_event is not None:
+                key_listener_stop_event.set()
             # Restore original signal handler
-            if original_handler:
+            if original_handler is not None:  # Explicit None check - SIG_DFL can be 0/falsy!
                 signal.signal(signal.SIGINT, original_handler)

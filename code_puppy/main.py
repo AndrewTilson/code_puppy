@@ -6,8 +6,62 @@ import subprocess
 import sys
 import time
 import traceback
-import webbrowser
 from pathlib import Path
+
+from pydantic_ai import _agent_graph
+
+# Monkey-patch: disable overly strict message history cleaning
+_agent_graph._clean_message_history = lambda messages: messages
+
+# Monkey-patch: store original _process_message_history and create a less strict version
+# Pydantic AI added a validation that history must end with ModelRequest, but this
+# breaks valid use cases. We patch it to skip that validation.
+_original_process_message_history = _agent_graph._process_message_history
+
+
+async def _patched_process_message_history(messages, processors, run_context):
+    """Patched version that doesn't enforce ModelRequest at end."""
+    from pydantic_ai._agent_graph import (
+        _HistoryProcessorAsync,
+        _HistoryProcessorSync,
+        _HistoryProcessorSyncWithCtx,
+        cast,
+        exceptions,
+        is_async_callable,
+        is_takes_ctx,
+        run_in_executor,
+    )
+
+    for processor in processors:
+        takes_ctx = is_takes_ctx(processor)
+
+        if is_async_callable(processor):
+            if takes_ctx:
+                messages = await processor(run_context, messages)
+            else:
+                async_processor = cast(_HistoryProcessorAsync, processor)
+                messages = await async_processor(messages)
+        else:
+            if takes_ctx:
+                sync_processor_with_ctx = cast(_HistoryProcessorSyncWithCtx, processor)
+                messages = await run_in_executor(
+                    sync_processor_with_ctx, run_context, messages
+                )
+            else:
+                sync_processor = cast(_HistoryProcessorSync, processor)
+                messages = await run_in_executor(sync_processor, messages)
+
+    if len(messages) == 0:
+        raise exceptions.UserError("Processed history cannot be empty.")
+
+    # NOTE: We intentionally skip the "must end with ModelRequest" validation
+    # that was added in newer Pydantic AI versions. It's overly strict and
+    # breaks valid conversation flows.
+
+    return messages
+
+
+_agent_graph._process_message_history = _patched_process_message_history
 
 from dbos import DBOS, DBOSConfig
 from rich.console import Console, ConsoleOptions, RenderResult
@@ -29,11 +83,15 @@ from code_puppy.config import (
     save_command_to_history,
 )
 from code_puppy.http_utils import find_available_port
+from code_puppy.keymap import (
+    KeymapError,
+    get_cancel_agent_display_name,
+    validate_cancel_agent_key,
+)
 from code_puppy.messaging import emit_info
 from code_puppy.tools.common import console
 
 # message_history_accumulator and prune_interrupted_tool_calls have been moved to BaseAgent class
-from code_puppy.tui_state import is_tui_mode, set_tui_mode
 from code_puppy.version_checker import default_version_mismatch_behavior
 
 plugins.load_plugin_callbacks()
@@ -53,13 +111,6 @@ async def main():
         "-i",
         action="store_true",
         help="Run in interactive mode",
-    )
-    parser.add_argument("--tui", "-t", action="store_true", help="Run in TUI mode")
-    parser.add_argument(
-        "--web",
-        "-w",
-        action="store_true",
-        help="Run in web mode (serves TUI in browser)",
     )
     parser.add_argument(
         "--prompt",
@@ -87,97 +138,38 @@ async def main():
     parser.add_argument(
         "command", nargs="*", help="Run a single command (deprecated, use -p instead)"
     )
+    parser.add_argument(
+        "--acp",
+        action="store_true",
+        help="Run as ACP (Agent Client Protocol) agent for editor integration",
+    )
     args = parser.parse_args()
 
-    if args.tui or args.web:
-        set_tui_mode(True)
-    elif args.interactive or args.command or args.prompt:
-        set_tui_mode(False)
+    # ACP mode: run as JSON-RPC agent over stdio (for Zed, etc.)
+    # This must be checked BEFORE any interactive setup or stdout output
+    if args.acp:
+        from code_puppy.acp import run_acp_agent
 
-    message_renderer = None
-    if not is_tui_mode():
-        from rich.console import Console
+        await run_acp_agent()
+        return
+    from rich.console import Console
 
-        from code_puppy.messaging import (
-            SynchronousInteractiveRenderer,
-            get_global_queue,
-        )
+    from code_puppy.messaging import (
+        SynchronousInteractiveRenderer,
+        get_global_queue,
+    )
 
-        message_queue = get_global_queue()
-        display_console = Console()  # Separate console for rendering messages
-        message_renderer = SynchronousInteractiveRenderer(
-            message_queue, display_console
-        )
-        message_renderer.start()
-
-    if (
-        not args.tui
-        and not args.interactive
-        and not args.web
-        and not args.command
-        and not args.prompt
-    ):
-        pass
+    message_queue = get_global_queue()
+    display_console = Console()  # Separate console for rendering messages
+    message_renderer = SynchronousInteractiveRenderer(message_queue, display_console)
+    message_renderer.start()
 
     initialize_command_history_file()
-    if args.web:
-        from rich.console import Console
-
-        direct_console = Console()
-        try:
-            # Find an available port for the web server
-            available_port = find_available_port()
-            if available_port is None:
-                direct_console.print(
-                    "[bold red]Error:[/bold red] No available ports in range 8090-9010!"
-                )
-                sys.exit(1)
-            python_executable = sys.executable
-            serve_command = f"{python_executable} -m code_puppy --tui"
-            textual_serve_cmd = [
-                "textual",
-                "serve",
-                "-c",
-                serve_command,
-                "--port",
-                str(available_port),
-            ]
-            direct_console.print(
-                "[bold blue]🌐 Starting Code Puppy web interface...[/bold blue]"
-            )
-            direct_console.print(f"[dim]Running: {' '.join(textual_serve_cmd)}[/dim]")
-            web_url = f"http://localhost:{available_port}"
-            direct_console.print(
-                f"[green]Web interface will be available at: {web_url}[/green]"
-            )
-            direct_console.print("[yellow]Press Ctrl+C to stop the server.[/yellow]\n")
-            process = subprocess.Popen(textual_serve_cmd)
-            time.sleep(0.3)
-            try:
-                direct_console.print(
-                    "[cyan]🚀 Opening web interface in your default browser...[/cyan]"
-                )
-                webbrowser.open(web_url)
-                direct_console.print("[green]✅ Browser opened successfully![/green]\n")
-            except Exception as e:
-                direct_console.print(
-                    f"[yellow]⚠️  Could not automatically open browser: {e}[/yellow]"
-                )
-                direct_console.print(
-                    f"[yellow]Please manually open: {web_url}[/yellow]\n"
-                )
-            result = process.wait()
-            sys.exit(result)
-        except Exception as e:
-            direct_console.print(
-                f"[bold red]Error starting web interface:[/bold red] {str(e)}"
-            )
-            sys.exit(1)
     from code_puppy.messaging import emit_system_message
 
     # Show the awesome Code Puppy logo only in interactive mode (never in TUI mode)
     # Always check both command line args AND runtime TUI state for safety
-    if args.interactive and not args.tui and not args.web and not is_tui_mode():
+    if args.interactive:
         try:
             import pyfiglet
 
@@ -219,6 +211,15 @@ async def main():
         set_model_name(early_model)
 
     ensure_config_exists()
+
+    # Validate cancel_agent_key configuration early
+    try:
+        validate_cancel_agent_key()
+    except KeymapError as e:
+        from code_puppy.messaging import emit_error
+
+        emit_error(str(e))
+        sys.exit(1)
 
     # Load API keys from puppy.cfg into environment variables
     from code_puppy.config import load_api_keys_to_environment
@@ -344,29 +345,9 @@ async def main():
 
         if prompt_only_mode:
             await execute_single_prompt(initial_command, message_renderer)
-        elif is_tui_mode():
-            try:
-                from code_puppy.tui import run_textual_ui
-
-                await run_textual_ui(initial_command=initial_command)
-            except ImportError:
-                from code_puppy.messaging import emit_error, emit_warning
-
-                emit_error(
-                    "Error: Textual UI not available. Install with: pip install textual"
-                )
-                emit_warning("Falling back to interactive mode...")
-                await interactive_mode(message_renderer, use_simple_input=args.no_prompt_toolkit)
-            except Exception as e:
-                from code_puppy.messaging import emit_error, emit_warning
-
-                emit_error(f"TUI Error: {str(e)}")
-                emit_warning("Falling back to interactive mode...")
-                await interactive_mode(message_renderer, use_simple_input=args.no_prompt_toolkit)
-        elif args.interactive or initial_command:
-            await interactive_mode(message_renderer, initial_command=initial_command, use_simple_input=args.no_prompt_toolkit)
         else:
-            await prompt_then_interactive_mode(message_renderer)
+            # Default to interactive mode (no args = same as -i)
+            await interactive_mode(message_renderer, initial_command=initial_command, use_simple_input=args.no_prompt_toolkit)
     finally:
         if message_renderer:
             message_renderer.stop()
@@ -392,8 +373,9 @@ async def interactive_mode(message_renderer, initial_command: str = None, use_si
     emit_system_message(
         "[dim]Type [bold blue]@[/bold blue] for path completion, or [bold blue]/model[/bold blue] to pick a model. Toggle multiline with [bold blue]Alt+M[/bold blue] or [bold blue]F2[/bold blue]; newline: [bold blue]Ctrl+J[/bold blue].[/dim]"
     )
+    cancel_key = get_cancel_agent_display_name()
     emit_system_message(
-        "[dim]Press [bold red]Ctrl+C[/bold red] during processing to cancel the current task or inference. Use [bold red]Ctrl+X[/bold red] to interrupt running shell commands.[/dim]"
+        f"[dim]Press [bold red]{cancel_key}[/bold red] during processing to cancel the current task or inference. Use [bold red]Ctrl+X[/bold red] to interrupt running shell commands.[/dim]"
     )
     emit_system_message(
         "[dim]Use [bold blue]/autosave_load[/bold blue] to manually load a previous autosave session.[/dim]"
@@ -438,6 +420,11 @@ async def interactive_mode(message_renderer, initial_command: str = None, use_si
             )
             if response is not None:
                 agent_response = response.output
+
+                # Update the agent's message history with the complete conversation
+                # including the final assistant response
+                if hasattr(response, "all_messages"):
+                    agent.set_message_history(list(response.all_messages()))
 
                 emit_system_message(
                     f"\n[bold purple]AGENT RESPONSE: [/bold purple]\n{agent_response}"
@@ -578,15 +565,17 @@ async def interactive_mode(message_renderer, initial_command: str = None, use_si
                     # Handle async autosave loading
                     try:
                         # Check if we're in a real interactive terminal
-                        # (not pexpect/tests) - TUI requires proper TTY
-                        use_tui = sys.stdin.isatty() and sys.stdout.isatty()
+                        # (not pexpect/tests) - interactive picker requires proper TTY
+                        use_interactive_picker = (
+                            sys.stdin.isatty() and sys.stdout.isatty()
+                        )
 
                         # Allow environment variable override for tests
                         if os.getenv("CODE_PUPPY_NO_TUI") == "1":
-                            use_tui = False
+                            use_interactive_picker = False
 
-                        if use_tui:
-                            # Use new TUI picker for interactive sessions
+                        if use_interactive_picker:
+                            # Use interactive picker for terminal sessions
                             from code_puppy.agents.agent_manager import (
                                 get_current_agent,
                             )
@@ -673,6 +662,13 @@ async def interactive_mode(message_renderer, initial_command: str = None, use_si
                 emit_system_message(
                     f"\n[bold purple]AGENT RESPONSE: [/bold purple]\n{agent_response}"
                 )
+
+                # Update the agent's message history with the complete conversation
+                # including the final assistant response. The history_processors callback
+                # may not capture the final message, so we use result.all_messages()
+                # to ensure the autosave includes the complete conversation.
+                if hasattr(result, "all_messages"):
+                    current_agent.set_message_history(list(result.all_messages()))
 
                 # Ensure console output is flushed before next prompt
                 # This fixes the issue where prompt doesn't appear after agent response
@@ -812,65 +808,6 @@ async def execute_single_prompt(prompt: str, message_renderer) -> None:
         from code_puppy.messaging import emit_error
 
         emit_error(f"Error executing prompt: {str(e)}")
-
-
-async def prompt_then_interactive_mode(message_renderer) -> None:
-    """Prompt user for input, execute it, then continue in interactive mode."""
-    from code_puppy.messaging import emit_info, emit_system_message
-
-    emit_info("[bold green]🐶 Code Puppy[/bold green] - Enter your request")
-    emit_system_message(
-        "After processing your request, you'll continue in interactive mode."
-    )
-
-    try:
-        # Get user input
-        from code_puppy.command_line.prompt_toolkit_completion import (
-            get_input_with_combined_completion,
-            get_prompt_with_active_model,
-        )
-        from code_puppy.config import COMMAND_HISTORY_FILE
-
-        emit_info("[bold blue]What would you like me to help you with?[/bold blue]")
-
-        try:
-            # Use prompt_toolkit for enhanced input with path completion
-            user_prompt = await get_input_with_combined_completion(
-                get_prompt_with_active_model(), history_file=COMMAND_HISTORY_FILE
-            )
-        except ImportError:
-            # Fall back to basic input if prompt_toolkit is not available
-            user_prompt = input(">>> ")
-
-        if user_prompt.strip():
-            # Execute the prompt
-            await execute_single_prompt(user_prompt, message_renderer)
-
-            # Transition to interactive mode
-            emit_system_message("\n" + "=" * 50)
-            emit_info("[bold green]🐶 Continuing in Interactive Mode[/bold green]")
-            emit_system_message(
-                "Your request and response are preserved in the conversation history."
-            )
-            emit_system_message("=" * 50 + "\n")
-
-            # Continue in interactive mode with the initial command as history
-            await interactive_mode(message_renderer, initial_command=user_prompt)
-        else:
-            # No input provided, just go to interactive mode
-            await interactive_mode(message_renderer)
-
-    except (KeyboardInterrupt, EOFError):
-        from code_puppy.messaging import emit_warning
-
-        emit_warning("\nInput cancelled. Starting interactive mode...")
-        await interactive_mode(message_renderer)
-    except Exception as e:
-        from code_puppy.messaging import emit_error
-
-        emit_error(f"Error in prompt mode: {str(e)}")
-        emit_info("Falling back to interactive mode...")
-        await interactive_mode(message_renderer)
 
 
 def main_entry():

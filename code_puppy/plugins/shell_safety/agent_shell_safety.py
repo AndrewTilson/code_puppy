@@ -108,24 +108,29 @@ class ShellSafetyAgent(BaseAgent):
                 return ShellSafetyAssessment(
                     risk="high",
                     reasoning="Model configuration unavailable - failing safe",
+                    is_fallback=True,
                 )
 
             model = ModelFactory.get_model(model_name, models_config)
 
-            # Handle claude-code models specially (like in agent_tools.py)
+            # Handle claude-code models: swap instructions and prepend system prompt
+            from code_puppy.model_utils import prepare_prompt_for_model
+
             instructions = self.get_system_prompt()
-            if model_name.startswith("claude-code"):
-                # For claude-code models, prepend system prompt to user prompt
-                prompt = instructions + "\n\n" + prompt
-                instructions = (
-                    "You are Claude Code, Anthropic's official CLI for Claude."
-                )
+            prepared = prepare_prompt_for_model(model_name, instructions, prompt)
+            instructions = prepared.instructions
+            prompt = prepared.user_prompt
+
+            from code_puppy.model_factory import make_model_settings
+
+            model_settings = make_model_settings(model_name)
 
             temp_agent = Agent(
                 model=model,
                 system_prompt=instructions,
-                retries=1,
+                retries=2,  # Increase from 1 to 2 for better reliability
                 output_type=ShellSafetyAssessment,
+                model_settings=model_settings,
             )
 
             # Generate unique agent name and workflow ID for DBOS (if enabled)
@@ -150,7 +155,7 @@ class ShellSafetyAgent(BaseAgent):
                     task = asyncio.create_task(
                         temp_agent.run(
                             prompt,
-                            usage_limits=UsageLimits(request_limit=1),
+                            usage_limits=UsageLimits(request_limit=3),
                         )
                     )
                     _active_subagent_tasks.add(task)
@@ -158,7 +163,7 @@ class ShellSafetyAgent(BaseAgent):
                 task = asyncio.create_task(
                     temp_agent.run(
                         prompt,
-                        usage_limits=UsageLimits(request_limit=1),
+                        usage_limits=UsageLimits(request_limit=3),
                     )
                 )
                 _active_subagent_tasks.add(task)
@@ -171,28 +176,11 @@ class ShellSafetyAgent(BaseAgent):
                     if get_use_dbos():
                         DBOS.cancel_workflow(workflow_id)
 
-            # Return the structured output
-            # The result.output should be a ShellSafetyAssessment due to the generic type
-            output = result.output
-
-            # If it's a string, try to parse it as JSON into ShellSafetyAssessment
-            if isinstance(output, str):
-                import json
-
-                try:
-                    data = json.loads(output)
-                    return ShellSafetyAssessment(**data)
-                except Exception:
-                    # If parsing fails, fail safe
-                    return ShellSafetyAssessment(
-                        risk="high",
-                        reasoning=f"Could not parse assessment output: {output[:100]}",
-                    )
-
-            return output
+            return result.output
 
         except Exception as e:
             return ShellSafetyAssessment(
                 risk="high",
                 reasoning=f"Safety assessment failed: {str(e)[:200]} - failing safe",
+                is_fallback=True,
             )
