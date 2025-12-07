@@ -4,32 +4,14 @@ import time
 
 import sys
 import pexpect
-try:
-    import pexpect.popen_spawn
 
-    class WinSpawn(pexpect.popen_spawn.PopenSpawn):
-        def isalive(self) -> bool:
-            return self.proc.poll() is None
-
-        def terminate(self, force: bool = False) -> None:
-            if force:
-                self.proc.kill()
-            else:
-                self.proc.terminate()
-except ImportError:
-    pass
+from cli_expect.spawn_utils import spawn_cli
 
 # No pytestmark - run in all environments but handle timing gracefully
 
 
-def spawn_cli(args: str):
-    if sys.platform.startswith("win32"):
-        return WinSpawn(args, encoding="utf-8")
-    return pexpect.spawn(args, encoding="utf-8")
-
-
 def test_version_smoke() -> None:
-    child = spawn_cli("code-puppy --version")
+    child = spawn_cli(["code-puppy", "--version"])
     child.expect(pexpect.EOF, timeout=10)
     output = child.before
     assert output.strip()  # just ensure we got something
@@ -37,7 +19,7 @@ def test_version_smoke() -> None:
 
 
 def test_help_smoke() -> None:
-    child = spawn_cli("code-puppy --help")
+    child = spawn_cli(["code-puppy", "--help"])
     child.expect("--version", timeout=10)
     child.expect(pexpect.EOF, timeout=10)
     output = child.before
@@ -46,7 +28,7 @@ def test_help_smoke() -> None:
 
 
 def test_interactive_smoke() -> None:
-    child = spawn_cli("code-puppy -i")
+    child = spawn_cli(["code-puppy", "-i"])
 
     # Handle initial prompts that might appear in CI - with increased timeouts
     try:

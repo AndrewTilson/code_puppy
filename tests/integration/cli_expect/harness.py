@@ -19,21 +19,10 @@ from dataclasses import dataclass, field
 from typing import Final
 
 import pexpect
-try:
-    import pexpect.popen_spawn
-    
-    class WinSpawn(pexpect.popen_spawn.PopenSpawn):
-        def isalive(self) -> bool:
-            return self.proc.poll() is None
-
-        def terminate(self, force: bool = False) -> None:
-            if force:
-                self.proc.kill()
-            else:
-                self.proc.terminate()
-except ImportError:
-    pass
 import pytest
+
+from .spawn_utils import spawn_cli
+
 
 CONFIG_TEMPLATE: Final[str] = """[puppy]
 puppy_name = IntegrationPup
@@ -307,24 +296,13 @@ class CliHarness:
         spawn_env["DBOS_SYSTEM_DATABASE_URL"] = f"sqlite:///{dbos_sqlite}"
         spawn_env.setdefault("DBOS_LOG_LEVEL", "ERROR")
 
-        if sys.platform.startswith("win32"):
-            # Windows: use PopenSpawn wrapper
-            cmd = " ".join(cmd_args)
-            child = WinSpawn(
-                cmd,
-                encoding="utf-8",
-                timeout=self._timeout,
-                env=spawn_env,
-            )
-        else:
-            # POSIX: use standard spawn
-            child = pexpect.spawn(
-                cmd_args[0],
-                args=cmd_args[1:],
-                encoding="utf-8",
-                timeout=self._timeout,
-                env=spawn_env,
-            )
+        child = spawn_cli(
+            cmd_args=cmd_args,
+            encoding="utf-8",
+            timeout=self._timeout,
+            env=spawn_env,
+        )
+
 
         log_file = None
         if self._capture_output:
