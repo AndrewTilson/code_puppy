@@ -486,15 +486,20 @@ async def interactive_mode(message_renderer, initial_command: str = None, use_si
         emit_info(f"[dim][bold blue]{user_prompt}\n[/bold blue][/dim]")
 
         try:
-            # Use prompt_toolkit for enhanced input with path completion
-            try:
-                # Use the async version of get_input_with_combined_completion
-                task = await get_input_with_combined_completion(
-                    get_prompt_with_active_model(), history_file=COMMAND_HISTORY_FILE
-                )
-            except ImportError:
-                # Fall back to basic input if prompt_toolkit is not available
+            # Use simple input if flag is set, otherwise use prompt_toolkit
+            if use_simple_input:
+                # Simple input for testing/CI environments
                 task = input(">>> ")
+            else:
+                # Use prompt_toolkit for enhanced input with path completion
+                try:
+                    # Use the async version of get_input_with_combined_completion
+                    task = await get_input_with_combined_completion(
+                        get_prompt_with_active_model(), history_file=COMMAND_HISTORY_FILE
+                    )
+                except ImportError:
+                    # Fall back to basic input if prompt_toolkit is not available
+                    task = input(">>> ")
 
         except (KeyboardInterrupt, EOFError):
             # Handle Ctrl+C or Ctrl+D
