@@ -65,7 +65,6 @@
   "cli.autosave.loaded": "✅ Autosave loaded: {messages} messages ({tokens} tokens)",
   "cli.autosave.loaded_path": "📁 From: {path}",
   "cli.autosave.tui_required": "Interactive session browsing needs a terminal. Use -r NAME to resume a session by name.",
-  "cli.banner.observability_pitch": "Need observability? Agentic governance? Controls? Check out Logfire / Pydantic Gateway →",
   "cli.banner.powered_by": "Powered by Pydantic ·",
   "cli.command.error": "Command error: {error}",
   "cli.context.cleared": "Context cleared. Session rotated to: {session}",
