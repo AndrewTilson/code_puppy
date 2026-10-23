@@ -94,6 +94,7 @@
   "computer_use.startup.opt_in": "Computer Use de macOS est désactivé par défaut. Exécutez `/computer-use enable` pour l’activer.",
   "confirm.no": "Non",
   "confirm.yes": "Oui",
+  "credentials.migration_skipped": "L’identifiant '{key}' n’a pas été migré : sa valeur dans {paths} ne correspond pas au stockage sécurisé ou à un autre profil. Rien n’a été écrasé; la valeur stockée est utilisée lorsqu’elle existe. Supprimez '{key}' de ces fichiers pour faire disparaître cet avertissement (copiez d’abord la valeur si vous en avez encore besoin).",
   "error.generic": "Une erreur s'est produite : {detail}",
   "files.deleted": {
     "one": "{count} fichier supprimé.",
