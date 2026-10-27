@@ -188,6 +188,7 @@ def _keybinding_section() -> HelpSection:
             HelpEntry("Ctrl+U", "Clear the whole input buffer"),
             HelpEntry("Ctrl+W", "Delete the word before the cursor"),
             HelpEntry("Ctrl+R", "Start a reverse history search"),
+            HelpEntry("Ctrl+L", "Clear the screen (your draft stays)"),
             HelpEntry(
                 "Ctrl+Left/Right, Option+Left/Right, or Meta-b/f",
                 "Jump the cursor by one word",
